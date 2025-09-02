@@ -17,7 +17,8 @@ import Data.Foldable qualified as Foldable
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
-import Data.List.Extra qualified as List
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Sequence (Seq ((:<|), (:|>)))
 import Data.Sequence qualified as Seq
@@ -32,13 +33,13 @@ import Data.Traversable (for)
 import Log (dirtyTraceM, dirtyTraceShowM)
 import Network.HTTP.Types (status200)
 import Network.Wreq qualified as Wreq
-import Prelude
 import PullRequests
 import Query
 import Repositories hiding (Repository)
 import Response
 import System.Environment (lookupEnv)
 import Text.Pretty.Simple (pShow)
+import Prelude
 
 getToken :: IO Text
 getToken =
@@ -49,13 +50,14 @@ getToken =
 
 post' :: (ToJSON a, FromJSON b) => Text -> a -> IO (Either String b)
 post' token a =
-    handle @SomeException (pure . Left . displayException) $ Wreq.postWith opts "https://api.github.com/graphql" (toJSON a) >>= \case
-        response
-            | response ^. Wreq.responseStatus == status200 ->
-                let body = response ^. Wreq.responseBody
-                    showBody = Text.unpack . Text.decodeUtf8 . LazyByteString.toStrict $ body
-                 in pure . mapLeft (<> "\n" <> showBody) . Aeson.eitherDecode $ body
-        response -> pure . Left . show $ response
+    handle @SomeException (pure . Left . displayException) $
+        Wreq.postWith opts "https://api.github.com/graphql" (toJSON a) >>= \case
+            response
+                | response ^. Wreq.responseStatus == status200 ->
+                    let body = response ^. Wreq.responseBody
+                        showBody = Text.unpack . Text.decodeUtf8 . LazyByteString.toStrict $ body
+                     in pure . mapLeft (<> "\n" <> showBody) . Aeson.eitherDecode $ body
+            response -> pure . Left . show $ response
   where
     opts =
         Wreq.defaults
@@ -137,23 +139,33 @@ main = do
                 . HashMap.fromListWith (+)
                 . mapMaybe (\(k, v) -> k <&> (,v))
                 . Foldable.toList
-                . Foldable.foldMap (fmap \pr -> (pullRequestContributor pr, pr.commits.totalCount))
+                . Foldable.foldMap (fmap \pr -> (pullRequestAuthor pr, pr.commits.totalCount))
                 $ prsByRepo
 
-    let sortedContributors :: [(Contributor, Int)]
+    let mergesByContributor :: HashMap Contributor Int
+        mergesByContributor =
+            HashMap.filterWithKey (const . not . isExcluded)
+                . HashMap.fromListWith (+)
+                . mapMaybe (<&> (,1))
+                . Foldable.toList
+                . Foldable.foldMap (fmap pullRequestMergedBy)
+                $ prsByRepo
+
+    let sortedContributors :: Map Contributor (Int, Int)
         sortedContributors =
-            List.sortOn fst
-                . HashMap.toList
-                $ commitsByContributor
+            Map.fromListWith (\(m1, c1) (m2, c2) -> (m1 + m2, c1 + c2)) $
+                (HashMap.toList commitsByContributor <&> \(c, commits) -> (c, (commits, 0)))
+                    <> (HashMap.toList mergesByContributor <&> \(c, merges) -> (c, (0, merges)))
 
     time <- getCurrentTime
 
     Text.writeFile "contributors.csv" . Text.unlines $
         let
             toRow = Text.intercalate ","
-            contributorRow :: (Contributor, Int) -> Text
-            contributorRow (Contributor{..}, commits) = toRow [githubId, githubUsername, ishow commits]
+            contributorRow :: (Contributor, (Int, Int)) -> Text
+            contributorRow (Contributor{..}, (merges, commits)) =
+                toRow [githubId, githubUsername, ishow merges, ishow commits]
          in
             ("# generated on " <> ishow time <> " with " <> ishow config)
-                : toRow ["githubId", "githubUsername", "commits"]
-                : (contributorRow <$> sortedContributors)
+                : toRow ["githubId", "githubUsername", "merges", "commits"]
+                : (contributorRow <$> Map.toList sortedContributors)
