@@ -8,7 +8,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async.Pool (mapConcurrently, withTaskGroup)
 import Control.Exception (SomeException, displayException, handle)
 import Control.Lens.Operators
-import Control.Monad.Extra (maybeM)
+import Control.Monad.Extra (maybeM, when)
 import Data.Aeson (FromJSON, ToJSON (toJSON))
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy qualified as LazyByteString
@@ -17,6 +17,7 @@ import Data.Foldable qualified as Foldable
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HashSet
+import Data.List qualified as List
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
@@ -37,8 +38,10 @@ import PullRequests
 import Query
 import Repositories hiding (Repository)
 import Response
+import System.Directory.Extra (doesFileExist)
 import System.Environment (lookupEnv)
 import Text.Pretty.Simple (pShow)
+import Text.Read (readMaybe)
 import Prelude
 
 getToken :: IO Text
@@ -121,51 +124,105 @@ prsForRepo Config{..} (owner, name) = go Nothing
                 else pure mempty
         pure $ olderPrs <> prs
 
+contributorHeaders :: Text
+contributorHeaders = Text.intercalate "," ["githubId", "githubUsername", "commits", "merges"]
+
+data Contributions = Contributions { commits :: Int, merges :: Int }
+    deriving stock (Show)
+
+instance Monoid Contributions where
+    mempty = Contributions{ commits = 0, merges = 0 }
+
+instance Semigroup Contributions where
+    c1 <> c2 = Contributions{ commits = c1.commits + c2.commits, merges = c1.merges + c2.merges }
+
+contributorToRow :: (Contributor, Contributions) -> Text
+contributorToRow (Contributor{..}, Contributions{..}) =
+    Text.intercalate "," [githubId, githubUsername, ishow commits, ishow merges]
+
+tread :: (Read a) => Text -> Maybe a
+tread = readMaybe . Text.unpack
+
+contributorFromRow :: Text -> Maybe (Contributor, Contributions)
+contributorFromRow (Text.split (== ',') -> [githubId, githubUsername, tread -> Just commits, tread -> Just merges]) =
+    Just (Contributor{..}, Contributions{..})
+contributorFromRow _ = Nothing
+
+eligibleHeaders :: Text
+eligibleHeaders = Text.intercalate "," ["githubId", "githubUsername", "email"]
+
+eligibleToRow :: Contributor -> Text
+eligibleToRow Contributor{..} = Text.intercalate "," [githubId, githubUsername, ""]
+
+getContributors :: IO (Map Contributor Contributions)
+getContributors =
+    doesFileExist file >>= \case
+        True ->
+            Map.fromList
+                . mapMaybe contributorFromRow
+                . Text.lines
+                <$> Text.readFile file
+        False -> do
+            config <- getConfig
+
+            repos <- getOfficialRepos
+
+            prsByRepo <- withTaskGroup 100 \group -> flip (mapConcurrently group) repos $ prsForRepo config
+
+            excludedIds <- HashSet.fromList . Text.lines <$> Text.readFile "excluded.csv"
+
+            let isExcluded Contributor{githubId} = HashSet.member githubId excludedIds
+
+            let commitsByContributor :: HashMap Contributor Int
+                commitsByContributor =
+                    HashMap.filterWithKey (const . not . isExcluded)
+                        . HashMap.fromListWith (+)
+                        . mapMaybe (\(k, v) -> k <&> (,v))
+                        . Foldable.toList
+                        . Foldable.foldMap (fmap \pr -> (pullRequestAuthor pr, pr.commits.totalCount))
+                        $ prsByRepo
+
+            let mergesByContributor :: HashMap Contributor Int
+                mergesByContributor =
+                    HashMap.filterWithKey (const . not . isExcluded)
+                        . HashMap.fromListWith (+)
+                        . mapMaybe (<&> (,1))
+                        . Foldable.toList
+                        . Foldable.foldMap (fmap pullRequestMergedBy)
+                        $ prsByRepo
+
+            let sortedContributors :: Map Contributor Contributions
+                sortedContributors =
+                    Map.fromListWith (<>) $
+                        (HashMap.toList commitsByContributor <&> \(c, commits) -> (c, mempty{Main.commits}))
+                            <> (HashMap.toList mergesByContributor <&> \(c, merges) -> (c, mempty{merges}))
+
+            time <- getCurrentTime
+
+            Text.writeFile file . Text.unlines $
+                ("# generated on " <> ishow time <> " with " <> ishow config)
+                    : contributorHeaders
+                    : (contributorToRow <$> Map.toList sortedContributors)
+
+            pure sortedContributors
+  where
+    file :: FilePath
+    file = "contributors.csv"
+
+isEligible :: Contributor -> Contributions -> Bool
+isEligible Contributor{githubId = tread @Int -> Just _} Contributions{..} = merges >= 1 || commits >= 25
+isEligible _ _ = False
+
 main :: IO ()
 main = do
-    config <- getConfig
-
-    repos <- getOfficialRepos
-
-    prsByRepo <- withTaskGroup 100 \group -> flip (mapConcurrently group) repos $ prsForRepo config
-
-    excludedIds <- HashSet.fromList . Text.lines <$> Text.readFile "excluded.csv"
-
-    let isExcluded Contributor{githubId} = HashSet.member githubId excludedIds
-
-    let commitsByContributor :: HashMap Contributor Int
-        commitsByContributor =
-            HashMap.filterWithKey (const . not . isExcluded)
-                . HashMap.fromListWith (+)
-                . mapMaybe (\(k, v) -> k <&> (,v))
-                . Foldable.toList
-                . Foldable.foldMap (fmap \pr -> (pullRequestAuthor pr, pr.commits.totalCount))
-                $ prsByRepo
-
-    let mergesByContributor :: HashMap Contributor Int
-        mergesByContributor =
-            HashMap.filterWithKey (const . not . isExcluded)
-                . HashMap.fromListWith (+)
-                . mapMaybe (<&> (,1))
-                . Foldable.toList
-                . Foldable.foldMap (fmap pullRequestMergedBy)
-                $ prsByRepo
-
-    let sortedContributors :: Map Contributor (Int, Int)
-        sortedContributors =
-            Map.fromListWith (\(m1, c1) (m2, c2) -> (m1 + m2, c1 + c2)) $
-                (HashMap.toList commitsByContributor <&> \(c, commits) -> (c, (commits, 0)))
-                    <> (HashMap.toList mergesByContributor <&> \(c, merges) -> (c, (0, merges)))
-
-    time <- getCurrentTime
-
-    Text.writeFile "contributors.csv" . Text.unlines $
-        let
-            toRow = Text.intercalate ","
-            contributorRow :: (Contributor, (Int, Int)) -> Text
-            contributorRow (Contributor{..}, (merges, commits)) =
-                toRow [githubId, githubUsername, ishow merges, ishow commits]
-         in
-            ("# generated on " <> ishow time <> " with " <> ishow config)
-                : toRow ["githubId", "githubUsername", "merges", "commits"]
-                : (contributorRow <$> Map.toList sortedContributors)
+    contributors <- getContributors
+    when (Map.null contributors) $ error "empty contributors"
+    let eligible =
+            List.sortOn (tread @Int . (.githubId))
+                . fmap fst
+                . filter (uncurry isEligible)
+                . Map.toList
+                $ contributors
+    when (List.null eligible) $ error "empty eligible"
+    Text.writeFile "eligible.csv" . Text.unlines $
+        eligibleHeaders : (eligibleToRow <$> eligible)
