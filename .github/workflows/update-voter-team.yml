@@ -5,6 +5,15 @@ on:
   push:
     branches:
       - main
+    # Prevent infinite loops when this action pushes commits
+    paths-ignore:
+      - invited.csv
+
+# This workflow changes state, we shouldn't run multiple at the same time!
+concurrency:
+  group: ${{ github.workflow }}
+  # Canceling could leave us in a bad state
+  cancel-in-progress: false
 
 jobs:
   update-voter-team:
@@ -22,25 +31,12 @@ jobs:
           ref: ${{ github.head_ref }}
       - name: Update team
         run: |
-          listActive() {
-            echo "Listing all active members of the team" >&2
+          list() {
+            echo "Listing all members of the team" >&2
             if ! response=$(gh api \
               --paginate \
               -H "Accept: application/vnd.github+json" \
               "/orgs/$ORG/teams/$VOTER_TEAM/members?per_page=100"); then
-              echo "$response" >&2
-              return 1
-            fi
-
-            jq -r '.[].id' <<< "$response"
-          }
-
-          listPending() {
-            echo "Listing all pending invitations to the team" >&2
-            if ! response=$(gh api \
-              --paginate \
-              -H "Accept: application/vnd.github+json" \
-              "/orgs/$ORG/teams/$VOTER_TEAM/invitations?per_page=100"); then
               echo "$response" >&2
               return 1
             fi
@@ -60,6 +56,8 @@ jobs:
             fi
             jq -r .login <<< "$response"
           }
+
+          invitedFile=invited.csv
 
           add() {
             local id=$1
@@ -86,6 +84,7 @@ jobs:
                 echo "User was not part of the organisation, sent an invite to join both the organisation and the team" >&2
                 ;;
             esac
+            echo "$id" >> "$invitedFile"
           }
 
           remove() {
@@ -101,19 +100,30 @@ jobs:
               echo "$response" >&2
               return 1
             fi
+            sed --in-place "/^$/d" "$invitedFile"
           }
 
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' exit
 
           tail -n+2 eligible.csv | cut -d, -f1 | sort > "$tmp/eligible"
-          ( listActive ; listPending ) | sort > "$tmp/githubTeamMembers"
-          comm -2 -3 "$tmp/eligible" "$tmp/githubTeamMembers" | while read id; do
+          ( list ; cat "$invitedFile" ) | sort | uniq > "$tmp/invited"
+
+           comm -2 -3 "$tmp/eligible" "$tmp/invited"| while read id; do
             add "$id" || true
           done
-          comm -1 -3 "$tmp/eligible" "$tmp/githubTeamMembers" | while read id; do
+          comm -2 -3 "$tmp/invited" "$tmp/eligible" | while read id; do
             remove "$id" || true
           done
+
+          sort -o "$invitedFile"{,}
+          git add "$invitedFile"
+          if ! git diff --cached --exit-code; then
+            git commit -m "Update list of invited users"
+            while ! git push; do
+              git pull --rebase
+            done
+          fi
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ github.repository_owner }}
