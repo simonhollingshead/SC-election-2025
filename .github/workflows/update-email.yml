@@ -35,6 +35,7 @@ jobs:
         to=$head
 
         # The PR can be automerged if it contains 1 deleted and 1 added line in eligible.csv
+
         # The deleted and added line should both concern the PR author
         changes=$(git diff "$from" "$to" --numstat)
         diff=$(git diff "$from" "$to")
