@@ -35,12 +35,14 @@ jobs:
         to=$head
 
         # The PR can be automerged if it contains 1 deleted and 1 added line in eligible.csv
-        changes=$(git diff "$from" "$to" --numstat)
-        [[ "$changes" != "1       1       eligible.csv" ]] || ( echo "unexpected changes: $changes"; exit 0 )
 
         # The deleted and added line should both concern the PR author
-        git diff --no-ext-diff | grep "^-$AUTHOR_ID," || ( echo "unexpected -diff"; exit 0 )
-        git diff --no-ext-diff | grep "^+$AUTHOR_ID," || ( echo "unexpected +diff"; exit 0 )
+        changes=$(git diff "$from" "$to" --numstat)
+        diff=$(git diff "$from" "$to")
+        if ! [[ "$changes" != "1       1       eligible.csv" ]] || ! grep "^-$AUTHOR_ID," <<< "$diff" || ! grep "^+$AUTHOR_ID," <<< "$diff"; then
+          echo "unexpected changes: $changes"
+          exit 1
+        fi
 
         # Merge the pull request, notably passing the sha we checked here,
         # to make sure it can't be updated while we're not looking
