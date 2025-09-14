@@ -1,6 +1,6 @@
 name: Candidate question
 description: A template to ask a question to a candidate
-title: "[Title]"
+title: ""
 labels: ["question"]
 body:
 - type: textarea

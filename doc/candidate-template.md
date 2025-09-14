@@ -14,4 +14,4 @@ List any potential conflicts of interest ([what is that?](https://github.com/Nix
 
 #### What I have done
 
-#### What I'll do
+#### What I will do
