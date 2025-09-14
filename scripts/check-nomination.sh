@@ -68,7 +68,7 @@ case "$EVENT" in
       exit 6
     fi
 
-    if [[ "$NOMINATOR_ID" == "$id" ]]; then
+    if [[ "$NOMINATOR_ID" == "$nomineeId" ]]; then
       scripts/self-nomination.sh "$nominatorEmail" "$nomineeHandle"
     else
       ENDORSER_ID="$NOMINATOR_ID" ENDORSER_LOGIN="$NOMINATOR_LOGIN" scripts/endorse.sh
