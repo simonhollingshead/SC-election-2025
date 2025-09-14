@@ -39,7 +39,7 @@ jobs:
         # The deleted and added line should both concern the PR author
         changes=$(git diff "$from" "$to" --numstat)
         diff=$(git diff "$from" "$to")
-        if ! [[ "$changes" != "1       1       eligible.csv" ]] || ! grep "^-$AUTHOR_ID," <<< "$diff" || ! grep "^+$AUTHOR_ID," <<< "$diff"; then
+        if [[ $(tr " \t" , <<< "$changes") != "1,1,eligible.csv" ]] || ! grep "^-$AUTHOR_ID," <<< "$diff" || ! grep "^+$AUTHOR_ID," <<< "$diff"; then
           echo "unexpected changes: $changes"
           exit 1
         fi
