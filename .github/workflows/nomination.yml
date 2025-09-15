@@ -3,6 +3,8 @@ name: "Nomination PRs"
 on:
   pull_request_target:
     types: [edited, opened, synchronize, reopened]
+    paths-ignore:
+      - eligible.csv
   issue_comment:
     types: [created]
 
